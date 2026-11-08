@@ -1,0 +1,82 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "iMicBridge/**"
+      - "iMicBridge.xcodeproj/**"
+      - "Info.plist"
+      - ".github/workflows/build-unsigned-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build unsigned app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project iMicBridge.xcodeproj \
+            -scheme iMicBridge \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Validate app bundle and create IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/iMicBridge.app"
+          echo "Built app path: $APP_PATH"
+          test -d "$APP_PATH" || { echo "::error::iMicBridge.app was not produced"; exit 1; }
+
+          echo "App bundle contents:"
+          ls -la "$APP_PATH"
+
+          EXECUTABLE="$APP_PATH/iMicBridge"
+          test -f "$EXECUTABLE" || { echo "::error::Executable iMicBridge is missing from app bundle"; exit 1; }
+          test -x "$EXECUTABLE" || chmod +x "$EXECUTABLE"
+
+          PLIST="$APP_PATH/Info.plist"
+          test -f "$PLIST" || { echo "::error::Info.plist is missing"; exit 1; }
+
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable iMicBridge" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string iMicBridge" "$PLIST"
+          ACTUAL_EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$PLIST")
+          test "$ACTUAL_EXECUTABLE" = "iMicBridge"
+          test -f "$APP_PATH/$ACTUAL_EXECUTABLE"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$PLIST"
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/iMicBridge.app"
+          cd "$RUNNER_TEMP/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/iMicBridge-unsigned.ipa" Payload
+          /usr/bin/unzip -t "$GITHUB_WORKSPACE/iMicBridge-unsigned.ipa"
+
+          mkdir -p "$RUNNER_TEMP/ipa-check"
+          /usr/bin/unzip -q "$GITHUB_WORKSPACE/iMicBridge-unsigned.ipa" -d "$RUNNER_TEMP/ipa-check"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$RUNNER_TEMP/ipa-check/Payload/iMicBridge.app/Info.plist"
+          test -f "$RUNNER_TEMP/ipa-check/Payload/iMicBridge.app/iMicBridge"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iMicBridge-unsigned-ipa
+          path: iMicBridge-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
